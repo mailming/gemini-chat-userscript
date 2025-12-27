@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         Gemini Console Chat Interface
 // @namespace    userscript://gemini-console-chat
-// @version      2.0
-// @description  Console interface + WebSocket bridge to interact with Gemini chat via server API
+// @version      2.1
+// @description  Console interface + HTTP polling bridge to interact with Gemini chat via server API
 // @author       Your Name
 // @match        https://gemini.google.com/app/*
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      127.0.0.1
+// @connect      localhost
 // @run-at       document-end
 // ==/UserScript==
 
@@ -21,16 +23,17 @@
     console.log('  - geminiDebug() - Show debug information about page elements');
     console.log('');
     console.log('🔌 Server Bridge:');
-    console.log('  - geminiConnect() - Connect to local server (ws://localhost:8766)');
+    console.log('  - geminiConnect() - Connect to local server (http://localhost:8765)');
     console.log('  - geminiDisconnect() - Disconnect from server');
     console.log('  - geminiServerStatus() - Check server connection status');
-    console.log('  - geminiTestConnection() - Test WebSocket connectivity');
+    console.log('  - geminiTestConnection() - Test HTTP connectivity');
 
-    // WebSocket connection management
-    let ws = null;
-    let reconnectTimer = null;
+    // Server connection management (HTTP polling instead of WebSocket due to CSP)
+    let pollingInterval = null;
+    let isConnected = false;
     let isManualDisconnect = false;
-    const WS_URL = 'ws://127.0.0.1:8766';
+    const SERVER_URL = 'http://127.0.0.1:8765';
+    const POLL_INTERVAL = 2000; // Poll every 2 seconds
     const RECONNECT_DELAY = 5000; // 5 seconds
 
     // Find the input textarea
@@ -396,139 +399,137 @@
         }, 50);
     };
 
-    // WebSocket connection functions
+    // HTTP polling connection functions (bypasses CSP restrictions)
     function connectToServer() {
-        if (ws && ws.readyState === WebSocket.OPEN) {
+        if (isConnected) {
             console.log('✅ Already connected to server');
             return;
         }
 
         isManualDisconnect = false;
-        console.log('🔌 Connecting to server at', WS_URL);
+        console.log('🔌 Connecting to server at', SERVER_URL);
 
-        try {
-            ws = new WebSocket(WS_URL);
-
-            ws.onopen = () => {
+        // Test connection with health check
+        httpRequest('GET', `${SERVER_URL}/health`, null, (response) => {
+            if (response.status === 'ok') {
                 console.log('✅ Connected to Gemini Chat Server!');
                 console.log('🎯 Server can now send requests to this browser tab');
+                isConnected = true;
                 
-                // Send ping to confirm connection
-                try {
-                    ws.send(JSON.stringify({
-                        type: 'ping',
-                        timestamp: Date.now()
-                    }));
-                } catch (e) {
-                    console.error('❌ Error sending ping:', e);
+                // Start polling for requests
+                startPolling();
+            } else {
+                console.error('❌ Server health check failed');
+                scheduleReconnect();
+            }
+        }, (error) => {
+            console.error('❌ Connection failed:', error);
+            console.log('💡 Possible issues:');
+            console.log('   1. Server not running: python server.py');
+            console.log('   2. Port blocked by firewall');
+            console.log('   3. Wrong server URL:', SERVER_URL);
+            scheduleReconnect();
+        });
+    }
+
+    function scheduleReconnect() {
+        if (!isManualDisconnect) {
+            console.log(`🔄 Reconnecting in ${RECONNECT_DELAY/1000} seconds...`);
+            setTimeout(connectToServer, RECONNECT_DELAY);
+        }
+    }
+
+    function startPolling() {
+        if (pollingInterval) {
+            clearInterval(pollingInterval);
+        }
+
+        // Poll server for pending requests
+        pollingInterval = setInterval(() => {
+            if (!isConnected) return;
+
+            httpRequest('GET', `${SERVER_URL}/poll`, null, (response) => {
+                if (response.request) {
+                    handleServerRequest(response.request);
                 }
-            };
+            }, (error) => {
+                // Connection lost
+                console.log('🔌 Connection to server lost');
+                stopPolling();
+                isConnected = false;
+                scheduleReconnect();
+            });
+        }, POLL_INTERVAL);
+    }
 
-            ws.onmessage = (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    handleServerMessage(data);
-                } catch (e) {
-                    console.error('❌ Error parsing server message:', e);
+    function stopPolling() {
+        if (pollingInterval) {
+            clearInterval(pollingInterval);
+            pollingInterval = null;
+        }
+    }
+
+    // HTTP request wrapper using GM_xmlhttpRequest to bypass CSP
+    function httpRequest(method, url, data, onSuccess, onError) {
+        if (typeof GM_xmlhttpRequest !== 'undefined') {
+            GM_xmlhttpRequest({
+                method: method,
+                url: url,
+                data: data ? JSON.stringify(data) : null,
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                onload: function(response) {
+                    try {
+                        const jsonResponse = JSON.parse(response.responseText);
+                        onSuccess(jsonResponse);
+                    } catch (e) {
+                        onError('Failed to parse response: ' + e.message);
+                    }
+                },
+                onerror: function(error) {
+                    onError(error.statusText || 'Network error');
+                },
+                ontimeout: function() {
+                    onError('Request timeout');
                 }
-            };
-
-            ws.onerror = (error) => {
-                console.error('❌ WebSocket error:', error);
-                console.error('Error details:', {
-                    type: error.type,
-                    target: error.target,
-                    url: WS_URL
-                });
-                console.log('💡 Possible issues:');
-                console.log('   1. Server not running: python server.py');
-                console.log('   2. Port blocked by firewall');
-                console.log('   3. Check server terminal for errors');
-            };
-
-            ws.onclose = (event) => {
-                console.log('🔌 Disconnected from server');
-                console.log('Close details:', {
-                    code: event.code,
-                    reason: event.reason || 'No reason provided',
-                    wasClean: event.wasClean
-                });
-                ws = null;
-
-                // Auto-reconnect unless manually disconnected
-                if (!isManualDisconnect) {
-                    console.log(`🔄 Reconnecting in ${RECONNECT_DELAY/1000} seconds...`);
-                    reconnectTimer = setTimeout(connectToServer, RECONNECT_DELAY);
-                }
-            };
-
-        } catch (e) {
-            console.error('❌ Failed to create WebSocket:', e);
-            console.error('Exception details:', e.message, e.stack);
-            console.log('💡 Make sure the server is running: python server.py');
+            });
+        } else {
+            // Fallback to fetch (may be blocked by CSP)
+            fetch(url, {
+                method: method,
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: data ? JSON.stringify(data) : null
+            })
+            .then(response => response.json())
+            .then(onSuccess)
+            .catch(onError);
         }
     }
 
     function disconnectFromServer() {
         isManualDisconnect = true;
-        
-        if (reconnectTimer) {
-            clearTimeout(reconnectTimer);
-            reconnectTimer = null;
-        }
-
-        if (ws) {
-            ws.close();
-            ws = null;
-            console.log('🔌 Manually disconnected from server');
-        } else {
-            console.log('⚠️ Not connected to server');
-        }
+        stopPolling();
+        isConnected = false;
+        console.log('🔌 Manually disconnected from server');
     }
 
     function getServerStatus() {
-        if (!ws) {
+        if (!isConnected) {
             console.log('🔴 Not connected to server');
             console.log('💡 Use geminiConnect() to connect');
             return 'disconnected';
         }
 
-        const states = {
-            [WebSocket.CONNECTING]: '🟡 Connecting...',
-            [WebSocket.OPEN]: '🟢 Connected',
-            [WebSocket.CLOSING]: '🟡 Closing...',
-            [WebSocket.CLOSED]: '🔴 Closed'
-        };
-
-        const status = states[ws.readyState] || '❓ Unknown';
-        console.log('Server status:', status);
-        return status;
+        console.log('🟢 Connected to server');
+        console.log('📊 Polling interval:', POLL_INTERVAL + 'ms');
+        return 'connected';
     }
 
-    async function handleServerMessage(data) {
-        console.log('📨 Received from server:', data.type);
-
-        switch (data.type) {
-            case 'connected':
-                console.log('✅ Server acknowledged connection');
-                break;
-
-            case 'pong':
-                // Ping response - connection is alive
-                break;
-
-            case 'request':
-                // Server is requesting us to send a message to Gemini
-                await handleServerRequest(data);
-                break;
-
-            default:
-                console.log('⚠️ Unknown message type:', data.type);
-        }
-    }
-
-    async function handleServerRequest(data) {
-        const { requestId, message, model } = data;
+    async function handleServerRequest(request) {
+        const { requestId, message, model } = request;
         
         console.log('📥 Server request:', {
             requestId: requestId,
@@ -542,38 +543,35 @@
 
             if (response) {
                 // Send response back to server
-                sendToServer({
-                    type: 'response',
-                    requestId: requestId,
-                    response: response
-                });
+                sendResponseToServer(requestId, response, null);
                 console.log('✅ Response sent to server');
             } else {
                 // Send error if no response
-                sendToServer({
-                    type: 'response',
-                    requestId: requestId,
-                    error: 'No response received from Gemini'
-                });
+                sendResponseToServer(requestId, null, 'No response received from Gemini');
                 console.log('⚠️ No response received from Gemini');
             }
 
         } catch (error) {
             console.error('❌ Error processing server request:', error);
-            sendToServer({
-                type: 'response',
-                requestId: requestId,
-                error: error.message || 'Unknown error'
-            });
+            sendResponseToServer(requestId, null, error.message || 'Unknown error');
         }
     }
 
-    function sendToServer(data) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(data));
-        } else {
-            console.error('❌ Cannot send to server: not connected');
-        }
+    function sendResponseToServer(requestId, response, error) {
+        const data = {
+            requestId: requestId,
+            response: response,
+            error: error
+        };
+
+        httpRequest('POST', `${SERVER_URL}/response`, data, 
+            (result) => {
+                // Response sent successfully
+            },
+            (err) => {
+                console.error('❌ Failed to send response to server:', err);
+            }
+        );
     }
 
     // Modified sendMessage function for server requests (no console logging spam)
@@ -696,39 +694,22 @@
         return getServerStatus();
     };
 
-    // Test WebSocket connectivity
+    // Test HTTP connection
     window.geminiTestConnection = function() {
-        console.log('🧪 Testing WebSocket connection...');
-        console.log('Target URL:', WS_URL);
-        console.log('Current ws state:', ws ? ws.readyState : 'null');
+        console.log('🧪 Testing HTTP connection...');
+        console.log('Target URL:', SERVER_URL);
+        console.log('Current status:', isConnected ? 'Connected' : 'Disconnected');
         
-        // Try to create a test connection
-        try {
-            const testWs = new WebSocket(WS_URL);
-            
-            testWs.onopen = () => {
+        httpRequest('GET', `${SERVER_URL}/health`, null,
+            (response) => {
                 console.log('✅ Test connection successful!');
-                testWs.close();
-            };
-            
-            testWs.onerror = (error) => {
+                console.log('Server response:', response);
+            },
+            (error) => {
                 console.error('❌ Test connection failed:', error);
-            };
-            
-            testWs.onclose = (event) => {
-                console.log('Test connection closed:', event.code, event.reason);
-            };
-            
-            setTimeout(() => {
-                if (testWs.readyState === WebSocket.CONNECTING) {
-                    console.log('⏱️ Still connecting after 5 seconds...');
-                    testWs.close();
-                }
-            }, 5000);
-            
-        } catch (e) {
-            console.error('❌ Cannot create WebSocket:', e);
-        }
+                console.log('💡 Make sure server is running: python server.py');
+            }
+        );
     };
 
     // Show welcome message after page loads
