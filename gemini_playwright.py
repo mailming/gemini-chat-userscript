@@ -310,11 +310,15 @@ async def init_browser():
         page = await context.new_page()
         
         print("Navigating to Gemini...")
-        await page.goto('https://gemini.google.com/app')
+        await page.goto('https://gemini.google.com/app', timeout=60000)
         
         # Wait for page to load
         print("Waiting for page to load...")
-        await page.wait_for_load_state('networkidle')
+        try:
+            await page.wait_for_load_state('networkidle', timeout=60000)
+        except:
+            print("Network idle timeout - continuing anyway...")
+            await page.wait_for_timeout(3000)
         
         # Wait for input box to appear
         print("Waiting for input box...")
