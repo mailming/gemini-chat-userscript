@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Gemini Console Chat Interface
 // @namespace    userscript://gemini-console-chat
-// @version      1.0
-// @description  Simple console interface to interact with Gemini chat - send input and get output via console
+// @version      2.0
+// @description  Console interface + WebSocket bridge to interact with Gemini chat via server API
 // @author       Your Name
 // @match        https://gemini.google.com/app/*
 // @grant        none
@@ -13,12 +13,24 @@
     'use strict';
 
     console.log('🤖 Gemini Console Chat Interface loaded!');
-    console.log('📝 Usage:');
+    console.log('📝 Console Usage:');
     console.log('  - geminiSend("your message") - Send a message to Gemini and wait for response');
     console.log('  - geminiType("your message") - Type message character by character (then send manually)');
     console.log('  - geminiGetLastResponse() - Get the last response from Gemini');
     console.log('  - geminiGetAllMessages() - Get all messages in the current chat');
     console.log('  - geminiDebug() - Show debug information about page elements');
+    console.log('');
+    console.log('🔌 Server Bridge:');
+    console.log('  - geminiConnect() - Connect to local server (ws://localhost:8766)');
+    console.log('  - geminiDisconnect() - Disconnect from server');
+    console.log('  - geminiServerStatus() - Check server connection status');
+
+    // WebSocket connection management
+    let ws = null;
+    let reconnectTimer = null;
+    let isManualDisconnect = false;
+    const WS_URL = 'ws://127.0.0.1:8766';
+    const RECONNECT_DELAY = 5000; // 5 seconds
 
     // Find the input textarea
     function findInputBox() {
@@ -383,11 +395,302 @@
         }, 50);
     };
 
+    // WebSocket connection functions
+    function connectToServer() {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            console.log('✅ Already connected to server');
+            return;
+        }
+
+        isManualDisconnect = false;
+        console.log('🔌 Connecting to server at', WS_URL);
+
+        try {
+            ws = new WebSocket(WS_URL);
+
+            ws.onopen = () => {
+                console.log('✅ Connected to Gemini Chat Server!');
+                console.log('🎯 Server can now send requests to this browser tab');
+                
+                // Send ping to confirm connection
+                ws.send(JSON.stringify({
+                    type: 'ping',
+                    timestamp: Date.now()
+                }));
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleServerMessage(data);
+                } catch (e) {
+                    console.error('❌ Error parsing server message:', e);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('❌ WebSocket error:', error);
+            };
+
+            ws.onclose = () => {
+                console.log('🔌 Disconnected from server');
+                ws = null;
+
+                // Auto-reconnect unless manually disconnected
+                if (!isManualDisconnect) {
+                    console.log(`🔄 Reconnecting in ${RECONNECT_DELAY/1000} seconds...`);
+                    reconnectTimer = setTimeout(connectToServer, RECONNECT_DELAY);
+                }
+            };
+
+        } catch (e) {
+            console.error('❌ Failed to connect to server:', e);
+            console.log('💡 Make sure the server is running: python server.py');
+        }
+    }
+
+    function disconnectFromServer() {
+        isManualDisconnect = true;
+        
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+
+        if (ws) {
+            ws.close();
+            ws = null;
+            console.log('🔌 Manually disconnected from server');
+        } else {
+            console.log('⚠️ Not connected to server');
+        }
+    }
+
+    function getServerStatus() {
+        if (!ws) {
+            console.log('🔴 Not connected to server');
+            console.log('💡 Use geminiConnect() to connect');
+            return 'disconnected';
+        }
+
+        const states = {
+            [WebSocket.CONNECTING]: '🟡 Connecting...',
+            [WebSocket.OPEN]: '🟢 Connected',
+            [WebSocket.CLOSING]: '🟡 Closing...',
+            [WebSocket.CLOSED]: '🔴 Closed'
+        };
+
+        const status = states[ws.readyState] || '❓ Unknown';
+        console.log('Server status:', status);
+        return status;
+    }
+
+    async function handleServerMessage(data) {
+        console.log('📨 Received from server:', data.type);
+
+        switch (data.type) {
+            case 'connected':
+                console.log('✅ Server acknowledged connection');
+                break;
+
+            case 'pong':
+                // Ping response - connection is alive
+                break;
+
+            case 'request':
+                // Server is requesting us to send a message to Gemini
+                await handleServerRequest(data);
+                break;
+
+            default:
+                console.log('⚠️ Unknown message type:', data.type);
+        }
+    }
+
+    async function handleServerRequest(data) {
+        const { requestId, message, model } = data;
+        
+        console.log('📥 Server request:', {
+            requestId: requestId,
+            message: message.substring(0, 50) + (message.length > 50 ? '...' : ''),
+            model: model
+        });
+
+        try {
+            // Send message to Gemini and wait for response
+            const response = await sendMessageForServer(message);
+
+            if (response) {
+                // Send response back to server
+                sendToServer({
+                    type: 'response',
+                    requestId: requestId,
+                    response: response
+                });
+                console.log('✅ Response sent to server');
+            } else {
+                // Send error if no response
+                sendToServer({
+                    type: 'response',
+                    requestId: requestId,
+                    error: 'No response received from Gemini'
+                });
+                console.log('⚠️ No response received from Gemini');
+            }
+
+        } catch (error) {
+            console.error('❌ Error processing server request:', error);
+            sendToServer({
+                type: 'response',
+                requestId: requestId,
+                error: error.message || 'Unknown error'
+            });
+        }
+    }
+
+    function sendToServer(data) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(data));
+        } else {
+            console.error('❌ Cannot send to server: not connected');
+        }
+    }
+
+    // Modified sendMessage function for server requests (no console logging spam)
+    async function sendMessageForServer(text) {
+        if (!text || text.trim() === '') {
+            throw new Error('Message cannot be empty');
+        }
+
+        const inputBox = findInputBox();
+        if (!inputBox) {
+            throw new Error('Could not find input box');
+        }
+
+        // Focus the input box first
+        inputBox.focus();
+        await new Promise(resolve => setTimeout(resolve, 100));
+
+        // For rich-textarea (Gemini's custom element)
+        if (inputBox.tagName.toLowerCase() === 'rich-textarea') {
+            const editableDiv = inputBox.querySelector('[contenteditable="true"]') || 
+                               inputBox.querySelector('.ql-editor') ||
+                               inputBox.shadowRoot?.querySelector('[contenteditable="true"]');
+            
+            if (editableDiv) {
+                editableDiv.focus();
+                
+                // Clear existing content safely
+                while (editableDiv.firstChild) {
+                    editableDiv.removeChild(editableDiv.firstChild);
+                }
+                
+                // Create a text node and insert it
+                const textNode = document.createTextNode(text);
+                const paragraph = document.createElement('p');
+                paragraph.appendChild(textNode);
+                editableDiv.appendChild(paragraph);
+                
+                // Set cursor to end
+                const range = document.createRange();
+                const sel = window.getSelection();
+                range.setStart(paragraph, 1);
+                range.collapse(true);
+                sel.removeAllRanges();
+                sel.addRange(range);
+                
+                // Trigger all necessary events
+                editableDiv.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                editableDiv.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                editableDiv.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: text }));
+                
+                // Also trigger on the rich-textarea itself
+                inputBox.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                inputBox.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            } else {
+                if (inputBox.value !== undefined) {
+                    inputBox.value = text;
+                }
+                inputBox.textContent = text;
+                inputBox.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            }
+        } else if (inputBox.tagName === 'TEXTAREA' || inputBox.tagName === 'INPUT') {
+            inputBox.value = text;
+            inputBox.dispatchEvent(new Event('input', { bubbles: true }));
+            inputBox.dispatchEvent(new Event('change', { bubbles: true }));
+        } else {
+            while (inputBox.firstChild) {
+                inputBox.removeChild(inputBox.firstChild);
+            }
+            const paragraph = document.createElement('p');
+            paragraph.textContent = text;
+            inputBox.appendChild(paragraph);
+            
+            inputBox.dispatchEvent(new Event('input', { bubbles: true }));
+            inputBox.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        // Wait for UI to update
+        await new Promise(resolve => setTimeout(resolve, 800));
+
+        // Find and click the send button
+        const sendButton = findSendButton();
+        if (sendButton) {
+            sendButton.click();
+        } else {
+            throw new Error('Could not find send button');
+        }
+
+        // Monitor for new responses
+        const initialMessageCount = getAllMessages().length;
+        let attempts = 0;
+        const maxAttempts = 120; // 60 seconds timeout for server requests
+
+        return new Promise((resolve) => {
+            const checkInterval = setInterval(() => {
+                attempts++;
+                const currentMessages = getAllMessages();
+                
+                if (currentMessages.length > initialMessageCount) {
+                    clearInterval(checkInterval);
+                    const lastMsg = currentMessages[currentMessages.length - 1];
+                    resolve(lastMsg.text);
+                } else if (attempts >= maxAttempts) {
+                    clearInterval(checkInterval);
+                    resolve(null);
+                }
+            }, 500);
+        });
+    }
+
+    // Export WebSocket functions to window
+    window.geminiConnect = function() {
+        connectToServer();
+    };
+
+    window.geminiDisconnect = function() {
+        disconnectFromServer();
+    };
+
+    window.geminiServerStatus = function() {
+        return getServerStatus();
+    };
+
     // Show welcome message after page loads
     setTimeout(() => {
         console.log('\n🎉 Ready to chat with Gemini via console!');
         console.log('Try: geminiSend("Hello, Gemini!")');
+        console.log('');
+        console.log('🌐 To enable server bridge:');
+        console.log('  1. Run: python server.py');
+        console.log('  2. Then: geminiConnect()');
     }, 2000);
+
+    // Auto-connect to server after 3 seconds
+    setTimeout(() => {
+        console.log('🔄 Auto-connecting to server...');
+        connectToServer();
+    }, 3000);
 
 })();
 
