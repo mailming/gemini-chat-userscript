@@ -24,6 +24,7 @@
     console.log('  - geminiConnect() - Connect to local server (ws://localhost:8766)');
     console.log('  - geminiDisconnect() - Disconnect from server');
     console.log('  - geminiServerStatus() - Check server connection status');
+    console.log('  - geminiTestConnection() - Test WebSocket connectivity');
 
     // WebSocket connection management
     let ws = null;
@@ -413,10 +414,14 @@
                 console.log('🎯 Server can now send requests to this browser tab');
                 
                 // Send ping to confirm connection
-                ws.send(JSON.stringify({
-                    type: 'ping',
-                    timestamp: Date.now()
-                }));
+                try {
+                    ws.send(JSON.stringify({
+                        type: 'ping',
+                        timestamp: Date.now()
+                    }));
+                } catch (e) {
+                    console.error('❌ Error sending ping:', e);
+                }
             };
 
             ws.onmessage = (event) => {
@@ -430,10 +435,24 @@
 
             ws.onerror = (error) => {
                 console.error('❌ WebSocket error:', error);
+                console.error('Error details:', {
+                    type: error.type,
+                    target: error.target,
+                    url: WS_URL
+                });
+                console.log('💡 Possible issues:');
+                console.log('   1. Server not running: python server.py');
+                console.log('   2. Port blocked by firewall');
+                console.log('   3. Check server terminal for errors');
             };
 
-            ws.onclose = () => {
+            ws.onclose = (event) => {
                 console.log('🔌 Disconnected from server');
+                console.log('Close details:', {
+                    code: event.code,
+                    reason: event.reason || 'No reason provided',
+                    wasClean: event.wasClean
+                });
                 ws = null;
 
                 // Auto-reconnect unless manually disconnected
@@ -444,7 +463,8 @@
             };
 
         } catch (e) {
-            console.error('❌ Failed to connect to server:', e);
+            console.error('❌ Failed to create WebSocket:', e);
+            console.error('Exception details:', e.message, e.stack);
             console.log('💡 Make sure the server is running: python server.py');
         }
     }
@@ -674,6 +694,41 @@
 
     window.geminiServerStatus = function() {
         return getServerStatus();
+    };
+
+    // Test WebSocket connectivity
+    window.geminiTestConnection = function() {
+        console.log('🧪 Testing WebSocket connection...');
+        console.log('Target URL:', WS_URL);
+        console.log('Current ws state:', ws ? ws.readyState : 'null');
+        
+        // Try to create a test connection
+        try {
+            const testWs = new WebSocket(WS_URL);
+            
+            testWs.onopen = () => {
+                console.log('✅ Test connection successful!');
+                testWs.close();
+            };
+            
+            testWs.onerror = (error) => {
+                console.error('❌ Test connection failed:', error);
+            };
+            
+            testWs.onclose = (event) => {
+                console.log('Test connection closed:', event.code, event.reason);
+            };
+            
+            setTimeout(() => {
+                if (testWs.readyState === WebSocket.CONNECTING) {
+                    console.log('⏱️ Still connecting after 5 seconds...');
+                    testWs.close();
+                }
+            }, 5000);
+            
+        } catch (e) {
+            console.error('❌ Cannot create WebSocket:', e);
+        }
     };
 
     // Show welcome message after page loads
