@@ -1,0 +1,23 @@
+{
+  "name": "gemini-chat-userscript",
+  "version": "1.0.0",
+  "description": "Playwright script to interact with Gemini chat interface",
+  "type": "module",
+  "main": "gemini-chat.js",
+  "scripts": {
+    "start": "node gemini-chat.js",
+    "test": "node gemini-chat.js"
+  },
+  "keywords": [
+    "playwright",
+    "gemini",
+    "automation",
+    "chat"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.40.0"
+  }
+}
+
