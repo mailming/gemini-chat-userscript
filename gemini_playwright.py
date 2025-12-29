@@ -43,6 +43,17 @@ def health():
     })
 
 
+@app.route('/debug', methods=['GET'])
+def debug():
+    """Debug endpoint to check page state"""
+    return jsonify({
+        'browser_ready': playwright_ready,
+        'pending_requests': request_queue.qsize(),
+        'page_exists': page is not None,
+        'message': 'Check browser window and console output for details'
+    })
+
+
 @app.route('/v1/models/<model>/generateContent', methods=['POST'])
 def generate_content(model):
     """
@@ -151,18 +162,46 @@ async def find_input_box(page: Page):
     """Find the Gemini input box"""
     selectors = [
         'rich-textarea',
+        'rich-textarea[placeholder*="Enter"]',
+        'rich-textarea[placeholder*="enter"]',
         'textarea[placeholder*="Enter"]',
+        'textarea[placeholder*="enter"]',
         'div[contenteditable="true"][role="textbox"]',
+        '[contenteditable="true"]',
+        'div[data-placeholder*="Enter"]',
     ]
     
-    for selector in selectors:
+    print("  Trying to find input box...")
+    for i, selector in enumerate(selectors, 1):
         try:
-            element = await page.wait_for_selector(selector, timeout=2000)
+            print(f"    [{i}/{len(selectors)}] Trying: {selector}")
+            element = await page.wait_for_selector(selector, timeout=5000)
             if element:
-                return element
-        except:
+                is_visible = await element.is_visible()
+                print(f"    ✓ Found element! Visible: {is_visible}")
+                if is_visible:
+                    return element
+                else:
+                    print(f"    ✗ Element found but not visible")
+        except Exception as e:
+            print(f"    ✗ Not found: {str(e)[:50]}")
             continue
     
+    # Try to find editable div inside rich-textarea
+    try:
+        print("  Trying to find editable div inside rich-textarea...")
+        rich_textarea = await page.query_selector('rich-textarea')
+        if rich_textarea:
+            editable = await rich_textarea.query_selector('[contenteditable="true"]')
+            if editable:
+                is_visible = await editable.is_visible()
+                print(f"    ✓ Found editable div! Visible: {is_visible}")
+                if is_visible:
+                    return editable
+    except Exception as e:
+        print(f"    ✗ Error: {str(e)[:50]}")
+    
+    print("  ✗ Could not find input box with any selector")
     return None
 
 
@@ -196,16 +235,42 @@ async def send_message(page: Page, message: str):
         initial_messages = await page.query_selector_all('message-content, model-response')
         initial_count = len(initial_messages)
         
-        # Type the message
+        # Click and focus the input box
         await input_box.click()
-        await page.wait_for_timeout(200)
+        await page.wait_for_timeout(300)
         
-        # Clear existing content
-        await page.keyboard.press('Control+A')
-        await page.keyboard.press('Backspace')
+        # For rich-textarea, we need to find the editable div inside
+        tag_name = await input_box.evaluate('el => el.tagName.toLowerCase()')
         
-        # Type message
-        await input_box.type(message, delay=10)
+        if tag_name == 'rich-textarea':
+            # Find the editable div inside
+            editable_div = await input_box.query_selector('[contenteditable="true"]')
+            if editable_div:
+                await editable_div.click()
+                await page.wait_for_timeout(200)
+                
+                # Clear existing content
+                await page.keyboard.press('Control+A')
+                await page.wait_for_timeout(100)
+                await page.keyboard.press('Backspace')
+                await page.wait_for_timeout(100)
+                
+                # Type message into the editable div
+                await editable_div.type(message, delay=10)
+            else:
+                # Fallback: type into rich-textarea directly
+                await input_box.type(message, delay=10)
+        else:
+            # Regular textarea or input
+            # Clear existing content
+            await page.keyboard.press('Control+A')
+            await page.wait_for_timeout(100)
+            await page.keyboard.press('Backspace')
+            await page.wait_for_timeout(100)
+            
+            # Type message
+            await input_box.type(message, delay=10)
+        
         await page.wait_for_timeout(500)
         
         # Find and click send button
@@ -322,26 +387,53 @@ async def init_browser():
         
         # Wait for input box to appear
         print("Waiting for input box...")
-        input_box = await find_input_box(page)
+        print("  (This may take a while if you need to log in)")
         
-        if input_box:
-            print("✓ Gemini page ready!")
-            playwright_ready = True
-            
-            # Start processing requests
-            await process_requests(page)
-        else:
-            print("✗ Could not find input box. Please log in manually if needed.")
-            print("  Waiting 30 seconds for manual login...")
-            await page.wait_for_timeout(30000)
-            
+        # Try multiple times with increasing delays
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            print(f"\n  Attempt {attempt}/{max_attempts}...")
             input_box = await find_input_box(page)
+            
             if input_box:
-                print("✓ Gemini page ready!")
+                print("\n✓ Gemini page ready!")
                 playwright_ready = True
+                
+                # Verify we can interact with it
+                try:
+                    await input_box.click()
+                    await page.wait_for_timeout(500)
+                    print("✓ Input box is interactive!")
+                except Exception as e:
+                    print(f"⚠ Warning: Could not interact with input box: {e}")
+                
+                # Start processing requests
                 await process_requests(page)
-            else:
-                print("✗ Still could not find input box. Exiting.")
+                return
+            
+            if attempt < max_attempts:
+                wait_time = 10 * attempt  # 10, 20, 30, 40 seconds
+                print(f"  Waiting {wait_time} seconds before retry...")
+                print(f"  (You can log in manually in the browser window)")
+                await page.wait_for_timeout(wait_time * 1000)
+        
+        # Final attempt
+        print("\n✗ Could not find input box after all attempts.")
+        print("  Please check:")
+        print("    1. Are you logged in to Google?")
+        print("    2. Is the Gemini page fully loaded?")
+        print("    3. Try refreshing the page in the browser")
+        print("\n  Browser window will stay open. You can:")
+        print("    - Log in manually")
+        print("    - Refresh the page")
+        print("    - Then restart this script")
+        
+        # Keep browser open for manual inspection
+        print("\n  Press Ctrl+C to exit...")
+        try:
+            await asyncio.sleep(3600)  # Wait 1 hour
+        except KeyboardInterrupt:
+            print("\nExiting...")
 
 
 def run_playwright():
