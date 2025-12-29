@@ -12,14 +12,25 @@ SERVER_URL = 'http://127.0.0.1:8765'
 def check_health():
     """Check if server is ready"""
     try:
-        response = requests.get(f'{SERVER_URL}/health')
+        response = requests.get(f'{SERVER_URL}/health', timeout=5)
+        response.raise_for_status()  # Raise exception for bad status codes
         data = response.json()
-        print(f"Server Status: {data['status']}")
-        print(f"Browser Ready: {data['browser_ready']}")
-        print(f"Pending Requests: {data['pending_requests']}")
-        return data['browser_ready']
+        print(f"Server Status: {data.get('status', 'unknown')}")
+        print(f"Browser Ready: {data.get('browser_ready', False)}")
+        print(f"Pending Requests: {data.get('pending_requests', 0)}")
+        return data.get('browser_ready', False)
+    except requests.exceptions.RequestException as e:
+        print(f"Connection Error: {e}")
+        return False
+    except KeyError as e:
+        print(f"Missing key in response: {e}")
+        print(f"Response was: {response.text if 'response' in locals() else 'No response'}")
+        return False
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {type(e).__name__}: {e}")
+        if 'response' in locals():
+            print(f"Response status: {response.status_code}")
+            print(f"Response text: {response.text[:200]}")
         return False
 
 

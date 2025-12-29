@@ -36,11 +36,26 @@ REQUEST_TIMEOUT = 60
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
-    return jsonify({
-        'status': 'ok',
-        'browser_ready': playwright_ready,
-        'pending_requests': request_queue.qsize()
-    })
+    try:
+        browser_status = bool(playwright_ready)
+        pending = request_queue.qsize()
+        
+        # Debug logging
+        print(f"[Health Check] browser_ready={browser_status}, pending={pending}")
+        
+        return jsonify({
+            'status': 'ok',
+            'browser_ready': browser_status,
+            'pending_requests': pending
+        })
+    except Exception as e:
+        print(f"[Health Check Error] {e}")
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'browser_ready': False,
+            'pending_requests': 0
+        }), 500
 
 
 @app.route('/debug', methods=['GET'])
